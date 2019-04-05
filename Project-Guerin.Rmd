@@ -1,0 +1,541 @@
+---
+title: "Time Series project"
+author: "Patrick Guerin - NOMA: 80541700"
+date: '`r Sys.Date()`'
+# fontsize: 11pt
+output: 
+  pdf_document:
+    toc: yes
+    df_print: paged
+    
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,fig.height=4)
+
+# install.packages('fGarch')
+# install.packages('ggfortify',dependencies = T)
+# install.packages('bindrcpp')
+# install.packages('randomForest')
+library(bindrcpp)
+library(ggfortify)
+library(fGarch)
+library(knitr)
+library(ggplot2)
+library(pander)
+library(forecast)
+require(randomForest)
+setwd("~/Time series analysis/time_series_project")
+source('FonctionsSeriesChrono.R') ## to compute rmse of one ahead pred, Holt-Winter,neural network and random forest one ahead prediction
+drivers <- read.table('drivers.txt', header = F) 
+drivers <- ts(drivers, start = 1969, frequency = 12)
+```
+
+#Introduction 
+
+In this project we study a time series representing the **monthly number of Car drivers killed or seriously injured** in Great Britain, from January 1969 to December 1984. We will explore the data in order to understand it,then choose and fit an appropriate model to forecast the monthly numbers of serious accidents for the year 1985. Finally we will assess the quality of our model.
+
+\newpage
+
+#Data exploration
+
+Firstly, to get an intuition about the data, we simply plot it.
+
+```{r}
+autoplot(drivers,ylab="Car drivers killed or seriously injured")
+ 
+
+```
+\
+We can observe that our data exhibits obvious  seasonality. To dig into it let's examine the average number of accidents associated with each month.
+\
+\
+
+```{r}
+month= matrix(nrow = 1,ncol=12)
+name= c("January","February","March",  "April",  "May", "June","July","August","September","October","November","December")
+for (i in 1:12){
+month[1,i]=mean(subset(drivers,cycle(drivers)==i))
+}
+colnames(month)=name
+kable(round(month,0),caption='average number of car drivers killed or seriously injured for each month of the year')
+```
+
+We can see that there is far much accidents during the autumn and winter seasons, until the month of January where the number of accident drops to 1698 in average.We can identify a seasonal component with a period of 12 months.\
+  
+In the precedent plot trend we also notice a trend: the number of accidents per year seems to decrease in time. we can investigate this by computing the average number of accident per year.
+\
+\
+
+```{r,echo=FALSE}
+year= matrix(nrow = 1,ncol=16)
+colnames(year)=c("1969","1970","1971","1972","1973","1974","1975","1976","1977","1978","1979","1980","1981","1982","1983","1984")
+value= c()
+for (j in 1:16){
+  for (i in 1:12){
+    value[i]=drivers[i+j*12-12]
+  }
+  year[j]=mean(value)
+}
+kable(round(year,0),caption='average number of car drivers killed or seriously injured per year')
+
+
+
+```
+
+We notice that after a first rise from 1969 to 1973, the number of serious car accidents declined from 1973 to 1977, in 1978 there was a spike, and after that,the number of accident tended to decline. In 1983 It appears than some changes occured since the number of accidents declined abrutly.
+
+Therefore, we will need to adress both issues of trend and seasonality.
+\
+\
+Moreover, it can be interesting to see if our process exhibits a variance constant in time or if it varies as time goes.
+
+
+```{r,echo=FALSE}
+year= matrix(nrow = 1,ncol=16)
+colnames(year)=c("1969","1970","1971","1972","1973","1974","1975","1976","1977","1978","1979","1980","1981","1982","1983","1984")
+value= c()
+for (j in 1:16){
+  for (i in 1:12){
+    value[i]=drivers[i+j*12-12]
+  }
+  year[j]=sd(value)
+}
+kable(round(year,0),caption='standard deviation of car drivers killed or seriously injured')
+
+x=colnames(year)
+
+ggplot(data.frame(x = x,y=year[1:16]), aes(x , y,group = 1))+
+      geom_line(color="darkblue")+
+      geom_point(color="darkblue")+
+      ggtitle("annual standard deviation of the number of car drivers killed or seriously injured")
+ 
+
+```
+
+We can see that the variance of our process clearly depends of the time.
+
+
+# Box-Jenkins analysis
+
+In this part,we will follow the Box-Jenkins method:
+
+**1-Identifying trend and seasonality in the time serie**
+
+**2-Estimation of the parameter of the model by Likelihood maximisation**
+
+**3-Model assessment with (p)acf plots and Ljung-Box test**
+
+\newpage
+
+##Transforming the data toward stationarity
+
+Evaluating if the serie if stationary is crucial since Box-Jenkins models rely on the hypothesis of a weakly stationary process. We have seen with the preceding exploration that both the mean and the variance are not constant over time, hence we have to make the data stationary.
+
+Firstly,we stabilize its variance with a logarithm transformation to reduce the largest fluctuations.
+
+
+```{r}
+
+drivers1=log(drivers)
+
+autoplot(drivers1, ts.colour = "darkblue",ylab="Logarithm of the number of drivers killed or injured")
+
+
+
+```
+
+We can observe that if the variance has been reduced, the data is not stationary yet, and we need to remove its trend and seasonality.
+
+
+## Adressing trend and seasonality with lagged differences
+
+
+We can decompose the time serie to separate its trend, seasonality and random component with the function **decompose** which use moving averages to estimate each component of the additive model $Y_{t} = T_{t} + S_{t} + e_{t}$
+
+
+```{r,echo=FALSE}
+plot(decompose(drivers, type = "additive")) # multiplicative model also possible
+
+
+```
+
+**Detrending**
+
+We can remove the trend by differencing the time serie to stabilize the mean:
+
+The transformation is $\Delta_{1} X_{t}$.
+
+```{r,echo=FALSE}
+drivers2 <- diff(drivers1, lag = 1)
+autoplot(drivers2, ts.colour = "darkblue",title="Number of car drivers killed or seriously injured, after first and 12-order differencing")
+
+
+
+```
+
+After this treatment,the mean now seems to be constant.  
+\
+**Deseasonalizing**
+
+To remove the effect of seasonality, we can take the lagged difference of order 12. 
+The transformation is $\Delta_{12} X_{t}$
+
+```{r,echo=FALSE}
+drivers3 <- diff(drivers2, lag = 12,diff=1)
+
+autoplot(drivers3, ts.colour = "darkblue",title="Number of car drivers killed or seriously injured with seasonality removed (s = 12)")
+
+
+```
+
+We can see the effect of removing this periodic component.
+
+We are going to assume the stationarity of this serie to fit a Seasonal ARIMA model
+
+
+
+In order to know if there is any correlation left we plot one more time the autocorrelation and partial autocorrelation functions:
+
+```{r}
+
+par(mfrow=c(1,2))
+Acf(drivers3, lag = 50, main = 'ACF of drivers2 production')
+Pacf(drivers3, lag = 50, main = 'PACF of drivers2 production')
+
+
+```
+
+We can see that the data is still correlated after those corrections, this can suggest that a stochastic seasonal component may remain: a Seasonal ARIMA model is adapted to adress this.
+
+From the Autocorrelation and partial autocorrelation function, we can identify an autoregressive part of order 1 and a moving average part of order 1, respectively corresponding to the first spike in ACF and PACF. We can identify a seasonal autogressive process of order 1 (other seasonal peaks are barely significant), and a seasonal moving average process of order 1 too.
+
+
+#Seasonal-ARIMA process
+
+To fit our SARIMA model, we use the Akaike criterion information to compare several SARIMA(p,1,q)(P,1,Q)12 with $p,q,P,Q \in [0,1]$:
+```{r,include=FALSE}
+
+Comp.Sarima(drivers, d = 1, saison = 12, D = 1, p.max = 1, q.max = 1, P.max = 1, Q.max = 1)
+
+```
+\
+The best model selected by AIC is the SARIMA(1,1,1)x(0,1,1)12, which can be written
+
+$(1- \Phi B)(1-B)(1-B_{12})Y_{t}=(1+\theta B)(1+\Theta B^{12})\epsilon_{t}$
+
+\
+Next,we estimate the parameters of the model by maximising the likelihood of the data conditionally to the parameters:
+```{r,include=FALSE}
+mod <- arima(drivers, order = c(1, 1,1), seasonal = list(order= c(0, 1, 1), period = 12))
+mod$coef=matrix(mod$coef,ncol=3)
+colnames(mod$coef)=c("ar1","ma1","sma1")
+kable(mod$coef)
+```
+
+
+
+##Testing normality and significance
+
+**Normality**
+
+We can test the significativity of the model coefficients, based on the assumption that the data is normally distributed, we use the Shapiro-wilk test to verify this hypothesis.
+```{r,echo=FALSE}
+
+pvalue=shapiro.test(mod$residuals)
+
+kable(pvalue$p.value,col.names = 'p-value')
+
+
+
+```
+For an alpha level of 5% we cannot reject the hypothesis of normality.We can use this fact to test the significance of the SARIMA coefficients. \[ (\text{H0}: \text{coeff}_{i} = 0, \text{H1}: \text{coeff}_{i} \neq 0 .)\]
+\
+**Statistical significance**
+
+```{r,echo=FALSE}
+pander(coef.p(mod$coef, diag(mod$var.coef)),caption ="p-values")
+```
+
+At a risk of 5% we can reject $\text{H0}$,all the coefficients are significantly different from zero.
+
+To see if there is any correlation left in the residuals, we can look at the autocorrelation function of the residuals.More formally,we can also use the Ljung-Box test to test the independance of the residuals.
+```{r,echo=FALSE,fig.height=5}
+
+tsdiag(mod, gof.lag = floor(sqrt(length(drivers))))
+
+```
+
+All the p-values are far higher than the 5% treshold and we cannot reject the hypothesis of independance.
+
+Moreover, the ACF plot shows that there is no autocorrelation in the residuals: the presence of autocorrelation in the residuals woud have suggested that there was information that had not been accounted for in the model.
+
+#Model evaluation
+
+One way to assess the predictive power of our model is to fit it on 80% of the data, make a one-ahead prediction, compute the error $\epsilon_{t}=\hat{X}_{t+1}-X_{t+1}$, and recursively fit the model with the new information obtained each time. At the end we obtains the root mean square error of all of one-ahead predictions: $\sqrt{\sum_{i=1}^{N}(\hat{X}_{t+i}-X_{t+i})^2}$.
+
+ 
+
+```{r,echo=FALSE}
+
+res= OneAhead(ts1=drivers, order=c(1,1,1), seasonal = list(order = c(0,1,1), period = 12))$error
+#better with seasonal 1 1 1..
+
+ kable(round(res,2),col.names="RMSE with one step-ahead prediction")
+
+
+ 
+```
+
+#Comparison with ARMA model
+
+It can be interesting to compare the performance of the SARIMA with ARMA and ARIMA models to highlight the necessity of having a seasonal model . After trials and error we chose to use BIC to do the model selection since AIC tended to favour less parcimonious (and not more accurate) models.
+
+```{r}
+
+BIC=1000
+  for (i in (1:2)) {
+    for (j in (1:2)){
+      model <- arima(drivers, order = c(i, 0,j))
+        if(BIC>Bic.arima(drivers, model)){
+          p=i
+          q=j
+          BIC=Bic.arima(drivers, model)
+         # print(paste("Best model according to Akaike informaiton criterion so far: ARMA(",i,",",j,")"))
+         # print(AIC)
+        }
+    }
+  }
+cat(paste("Best model according to Bayesian information criterion : ARMA(",p,",",q,")"))
+cat("BIC:",BIC)
+res_ARMA= OneAhead(ts1=drivers, order=c(1,0,1), seasonal = list(order = c(0,0,0), period = 0))$error
+
+
+
+BIC=1000
+  for (d in 0:1){
+    for (i in (1:2)) {
+      for (j in (1:2)){
+        model <- arima(drivers, order = c(i, d,j))
+          if(BIC>Bic.arima(drivers, model)){
+            p=i
+            q=j
+            BIC=Bic.arima(drivers, model)
+           # print(paste("Best model according to Bayesian informaiton criterion so far: ARMA(",i,",",j,")"))
+           # print(BIC)
+          }
+      }
+    }
+  }
+
+cat(paste("Best model according to Bayesian information criterion : ARIMA(",p,",",d,",",q,")"))
+cat("BIC:",BIC)
+
+res_ARIMA= OneAhead(ts1=drivers, order=c(1,1,1), seasonal = list(order = c(0,0,0), period = 0))$error
+
+
+```
+
+The best ARMA model selected has the form :
+$\Phi(B)Y_{t}=c+\theta(B)\epsilon_{t} \iff Y_{t}=c+\Phi_{1}Y_{t-1}+\epsilon_{t}+\theta_{1}\epsilon_{t-1}$
+
+\
+The best ARIMA model selected has the form: $y_{t}=c+\Phi_{1}y_{t-1}+\epsilon_{t}+\theta_{1}\epsilon_{t-1}$,
+
+with $y_{t}=Y_{t}-Y_{t-1}$
+
+```{r}
+table=matrix(c(round(res_ARMA,2),round(res_ARIMA,2),round(res,2)),nrow=1,ncol=3)
+colnames(table)=c("ARMA",'ARIMA','SARIMA')
+kable(table,caption="RMSE with one step-ahead prediction")
+```
+
+\
+Without surprise, the SARIMA model have a much better performance than the ARMA and ARIMA models since the data is strongly seasonal.
+
+#Prediction : Comparing SARIMA with Holt-Winters model
+
+
+
+The Holt-Winters modem also have a seasonal component and can be an interesting alternative to the SARIMA model.
+
+Below we Compute the one-ahead prediction error of the Holt-Winter algorithm. After that, we plot the predictions of the two models for the next two years, with 80% and 95% confidence intervals.
+
+
+```{r,warning=FALSE,fig.height=7}
+
+res_HW= HW_OneAhead(drivers)
+kable(round(res_HW$error,2),col.names= "Holt-Winter one step-ahead prediction error")
+
+par(mfrow=c(2,1))
+HW <- HoltWinters(drivers)
+
+
+
+forecast <-forecast(HW, h = 24)  
+
+
+plot(forecast,ylim=c(1000,2000),ylab="Car drivers killed or seriously injured", col ="darkblue",include=24,,showgap = FALSE,main= "HoltWinters forecast for the next 2 years")
+
+SARIMA.pred <- forecast(mod, h = 24)
+plot(SARIMA.pred,ylim=c(1000,2000),ylab=" Car drivers killed or seriously injured", col ="darkblue",include=24, main = "S-ARIMA forecast for the next 2 years",showgap = FALSE)
+
+```
+
+We can see that the forecast obtained with the Holt-Winter algorithm is smoother than the Seasonal ARIMA forecast while the confidence intervals are wider for the Holt-Winter method. Moreover, the one step-ahead prediction error is sligthly worse.
+
+This results can be explained by the fact that the Holt-Winter model is a more general model than the S-ARIMA, consequently it has also less risk of overfitting and could be prefered in case of long term prediction.
+
+\newpage
+
+# Random Forest for time series
+
+In this part, we tried to use the Random Forest model to assess its capacity to compete with the traditional approach of time series.
+
+## Brief description of the model
+
+
+In one hand Decision trees suffers from low accuracy when they are not grown deep enough, in the other hand if they are deep they tend to overfit the dataset. Hence, the bootstraping procedure is particularly adapted to the decisions trees. This is the idea of the random forest model.
+
+Each decision tree outputs a mean prediction and the random forest model is simply an average of an ensemble of decision trees, using bootstrap to decorelate the tree and further reduce the variance of the final prediction.
+
+The Boostrap aggregation is used in two ways for each tree:
+
+1.  We sample n observations from the training set
+
+2.  We sample m features from the feature space to be used in the trees.
+
+The second sampling is necessary because if one or a few features are very strong predictors for the response variable, these features will be selected in many of the trees, causing them to become correlated.
+
+
+## Application for time series
+
+The random forest algorithm is not natively made to deal with temporal data and we had to do create new variables in order to obtain good results.
+\
+  
+First we created a dataframe, with each row representing one observation containing the monthly number of severe accidents and several other features that we had to create:
+
+
+1.  Creation of two features from the date: **year** and **month**, month was encoded as a categorical variable ranging from 1 to 12, year could not be encoded as categorical variable since some categories would not present in the training set (e.g 1985 and futur years) and we would not be able to predict using unknown categories, hence it was encoded as a numerical variable.
+
+2.  Creation of a lot of features created from the past value of car accidents: $X_{t-1},...,X_{t-N}$. Each observations is composed of both its value at time t but also of all the values of the past.
+
+The number of features is considered as a parameter to optimize,in this case the best results were found the maximum number of features possible:`191. Indeed the more features $X_{t-i}$ we input in the model, the more information about the past it will have. Therefore, our dataset consists of 216 rows (for the 216 months from january 1969 to december 1986) and 194 columns. You can find in annexe a screenshot of a part of the dataset.
+
+We could afford to have so much features because the random Forest will itself perform a feature selection.
+
+\
+\
+From that dataset,we could estimate the generalization error by contructing a function to fit the model on 80% of the data, do successive one step ahead predictions, and update the dataset with the new row generated by each new prediction.
+
+This measure was used to fit the main parameters of the random forest (number of features sampled,number of trees used) and hyperparameters (number of features in the dataset).
+
+\
+After this, we used the random forest model to get an hint about the important variables of the dataset. To quantify the importance of a variable we used *mean decrease in accuracy* criterion. \footnote{
+To measure the "prediction strength" of a variable j,the accuracy(RMSE) of the model is recorded then the values of the variable j are permuted and the accuracy is again measured.The decrease in accuracy as a result of this permuting is averaged over all trees, and is used as a measure of the importance of variable j in the random forest.
+}
+
+Then, we sorted our features by decreasing order of importance and ploted them.
+
+\
+Finally, we used the fitted model to forecast the next 24 months of accidents.we also plotted the SARIMA forecast to facilitate the comparison.
+
+
+```{r,warning=FALSE,fig.height=5}
+
+data=data.frame(drivers)
+res_RF=Forest_OneAhead(data,features=152,start=1969,frequency=12,ntree=1000,mtry=3)
+
+kable(round(res_RF,2),col.names="Random Forest one step-ahead prediction error")
+
+
+rf=rf_model(data=data,h=24,features=191,start=1969,frequency=12,ntree=2000,mtry=50)
+
+a=rf$data
+imp=rf$model
+varImpPlot(imp,type=1,sort=T,n.var=20,main="Mean decrease in accuracy (top 20)")
+# rfbis=rf_model(data=data,h=24,features=168,start=1969,frequency=12,mtry=100)
+```
+
+```{r,warning=FALSE,fig.height=7}
+par(mfrow=c(2,1))
+
+plot(rf$values,ylim=c(1000,3000),ylab="Number of serious accidents", col ="darkblue", main = "Random forest forecast")
+
+plot(SARIMA.pred,ylim=c(1000,3000),ylab="Number of serious accidents ", col ="darkblue", main = "S-ARIMA forecast",showgap = FALSE)
+
+```
+
+The RMSE of our model is higher than those of the previous models, but this is not very surprising since we only created basic features.
+
+The measure of the variables importance is more interesting. The 3 more important variables are $X_{t-1},X_{t-12}$ and month, and had already been found with the Box-Jenkins approach. However other variables are also found important, in a lesser extent, like $X_{t-11}$ who indicate that the seasonality observed in the could be partly explained by a seasonal term of order 11.
+
+
+Finally, the ploted forecast is more optimistic than the SARIMA forecast.
+
+#Conclusion
+
+In this project we first applied the traditional time series models in order to predict the number of severe accidents over a two years period. Our forecasts (SARIMA) suggests that the variable of interest will have a neutral trend for the next two years.  
+  In order to improve the forecast it would be interesting to use multivariate techniques such as regSARIMA and integrate other variables such as the maximum speed authorized or the weather in a given month.   
+  Besides this traditional approach we tried to see how decision trees could be used,considering the simplicity of the approach the results were reasonably good and showed a good potential, particularly if we take into account that such methods does not require any assumption of stationarity. 
+
+
+#Annexe
+
+\begin{figure}[h]
+\caption{Dataset screenshot}
+\includegraphics{picture_dataset.jpg}
+\centering
+\end{figure}
+
+<!-- ##Neural Network for time series -->
+
+<!-- Finally we briefly examine how the two layers feed-forward network model can be applied to predict time series. -->
+
+
+<!-- Like the random forest, the neural network as to be fed with lagged inputs to predict time series.We use the \text{forecast} package  to construct the inputs and fit the model. -->
+
+<!-- According to the notation of Rob Hyndman,creator of the \text{forecast} package, we denote the general model NNAR(p,P,k)(m), which correspond to a neural network with inputs \((X_{t-1},X_{t-2},\dots,X_{t-p},X_{t-m},X_{t-2m},X_{t-Pm})\) -->
+<!-- and k neurons in the hidden layer. -->
+
+```{r,echo=F}
+
+# par(mfrow=c(2,1))
+# 
+# # find the best parameters
+# 
+# 
+# error=matrix(nrow=30,ncol=2)
+# for (i in 1:5){
+# error[i,1]=paste0(1,' nodes in hidden layer')
+# error[i,2]=NNET_OneAhead(drivers,size=i)$error
+# }
+# 
+# #Find the best parameters
+# error=as.numeric(error[order(error[,2]),][1,2])
+# 
+# 
+# 
+# kable(round(error,2),col.names = "Neural Network one step-ahead prediction error")
+# 
+# 
+# fit <- nnetar(drivers,size=3)
+# fcast <- forecast(fit, h=24)
+# 
+# par(mfrow=c(2,1))
+# 
+# plot(fcast,showgap=FALSE,ylim=c(1000,3000),ylab="Number of serious accidents ", col ="darkblue", main = "Neural network forecast")
+
+
+
+# <!-- <!-- NNAR(p,P,k)[m] model is analogous to an --> -->
+# <!-- <!-- ARIMA(p,0,0)(P,0,0)[m] model but with nonlinear functions, and without  the restrictions on the parameters to ensure stationarity. --> -->
+
+
+
+
+
+```
+
+
